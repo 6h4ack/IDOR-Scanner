@@ -201,7 +201,7 @@ def update_urlencoded_body(original_body, param_to_update, new_value):
 def update_multipart_body(original_body, boundary, param_to_update, new_value):
     """
     Updates a numeric parameter in the multipart/form-data body.
-    If the parameter appears multiple times, all instances are updated.
+    If the parameter appears multiple times, all instances are actualizadas.
     Returns the new multipart body as a string.
     """
     sep = "--" + boundary
@@ -480,6 +480,7 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
         Performs an active scan by modifying numeric fields (in the path, query, and body)
         and re-sending the request to detect potential IDOR vulnerabilities.
         Generates "IDORs Scanned (Active)" and, if applicable, "IDORs Confirmed (Active)" issues.
+        This method is used by Burp's active scanner.
         """
         messages = []
         modifications = []  # Stores tuples: (description of candidate, modified message)
@@ -672,6 +673,9 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
     #
     # Methods for the context menu (IContextMenuFactory)
     #
+    # Note: The parallel processing (launching individual threads) is applied only when the Scan IDOR button is used.
+    # When active scanning is triggered automatically by Burp, doActiveScan runs sequentially.
+    #
 
     def createMenuItems(self, invocation):
         """
@@ -697,22 +701,29 @@ class BurpExtender(IBurpExtender, IScannerCheck, IContextMenuFactory):
     def scanSelectedIDOR(self, invocation):
         """
         For each selected issue of type "Potentially IDOR Endpoint Detected",
-        executes the doActiveScan function in a separate thread to perform the checks and adds
-        the resulting issues (IDORs Scanned and IDORs Confirmed) using addScanIssue.
+        launches an individual thread to execute the active scan (doActiveScan).
+        This parallelization is applied only when triggered manually via the Scan IDOR button.
         """
-        def run_scan():
-            selectedIssues = invocation.getSelectedIssues()
-            if not selectedIssues:
-                return
-            for issue in selectedIssues:
-                if issue.getIssueName() == "Potentially IDOR Endpoint Detected":
-                    messages = issue.getHttpMessages()
-                    if messages and len(messages) > 0:
-                        baseRequestResponse = messages[0]
-                        newIssues = self.doActiveScan(baseRequestResponse, None)
-                        if newIssues:
-                            for newIssue in newIssues:
-                                self._callbacks.addScanIssue(newIssue)
-        # Execute the scanning logic in a separate thread to avoid blocking the Swing EDT
-        scan_thread = threading.Thread(target=run_scan)
-        scan_thread.start()
+        selectedIssues = invocation.getSelectedIssues()
+        if not selectedIssues:
+            return
+        # Launch a separate thread for each issue
+        for issue in selectedIssues:
+            if issue.getIssueName() == "Potentially IDOR Endpoint Detected":
+                threading.Thread(target=self.process_issue, args=(issue,)).start()
+
+    def process_issue(self, issue):
+        """
+        Processes an individual issue by executing doActiveScan.
+        Errors are caught to ensure one issue failure does not affect the others.
+        """
+        try:
+            messages = issue.getHttpMessages()
+            if messages and len(messages) > 0:
+                baseRequestResponse = messages[0]
+                newIssues = self.doActiveScan(baseRequestResponse, None)
+                if newIssues:
+                    for newIssue in newIssues:
+                        self._callbacks.addScanIssue(newIssue)
+        except Exception as e:
+            print("Error processing issue: {}".format(e))
